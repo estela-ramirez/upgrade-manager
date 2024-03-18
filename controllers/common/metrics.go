@@ -121,6 +121,7 @@ func SetTotalNodesMetric(groupName string, nodes int) {
 }
 
 func SetNodesProcessedMetric(groupName string, nodesProcessed int) {
+	log.Info("setting nodesProcessed for %s as %d", groupName, nodesProcessed)
 	addGaugeOrUpdate(nodesProcessedMetrics, groupName, nodesProcessed, "nodes_processed", "Nodes processed in the group")
 }
 

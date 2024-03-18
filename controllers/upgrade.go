@@ -458,6 +458,7 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 		r.Info("ignoring failed drain instances", "instances", excludedInstances, "name", r.RollingUpgrade.NamespacedName())
 	}
 	for _, instance := range r.Cloud.InProgressInstances {
+		r.Info("checking in progress instance", instance)
 		if selectedInstance := awsprovider.SelectScalingGroupInstance(instance, scalingGroup); !reflect.DeepEqual(selectedInstance, &autoscaling.Instance{}) {
 			//In-progress instances shouldn't be considered if they are in terminating state.
 			if !common.ContainsEqualFold(awsprovider.TerminatingInstanceStates, aws.StringValue(selectedInstance.LifecycleState)) {
@@ -465,9 +466,10 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 			}
 		}
 	}
+	r.Info("len of unrpocessedTargets", len(unrpocessedTargets))
 
 	if len(inprogressTargets) > 0 {
-		r.Info("found in-progress instances", "instances", awsprovider.GetInstanceIDs(inprogressTargets), "name", r.RollingUpgrade.NamespacedName())
+		r.Info("found in-progress instances 1", "instances", awsprovider.GetInstanceIDs(inprogressTargets), "name", r.RollingUpgrade.NamespacedName())
 	}
 
 	// continue to select other instances, if any.
@@ -477,6 +479,11 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 		return nil
 	}
 
+	if len(instances) > 0 {
+		r.Info("found instances not in-progress", "instances", instances)
+	}
+
+	// goes through instances not marked "in progress"
 	for _, instance := range instances {
 		//don't consider instances when - terminating, empty, duplicates, excluded (errored our previously), not drifted.
 		if selectedInstance := awsprovider.SelectScalingGroupInstance(instance, scalingGroup); !reflect.DeepEqual(selectedInstance, &autoscaling.Instance{}) {
@@ -486,6 +493,10 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 				}
 			}
 		}
+	}
+
+	if len(inprogressTargets) > 0 {
+		r.Info("found in-progress instances 2", "instances", awsprovider.GetInstanceIDs(inprogressTargets), "name", r.RollingUpgrade.NamespacedName())
 	}
 
 	r.Info("found unprocessed instances", "instances", unrpocessedTargets, "name", r.RollingUpgrade.NamespacedName())
@@ -561,15 +572,21 @@ func (r *RollingUpgradeContext) IsInstanceDrifted(instance *autoscaling.Instance
 	}
 
 	if scalingGroup.LaunchConfigurationName != nil {
+		r.Info("scalingGroup.LaunchConfigurationName != nil ")
 		if instance.LaunchConfigurationName == nil {
+			r.Info("Instance is drifted, launch configuration is empty", "instanceID", instanceID, "name", r.RollingUpgrade.NamespacedName())
 			return true
 		}
 		launchConfigName := aws.StringValue(scalingGroup.LaunchConfigurationName)
 		instanceConfigName := aws.StringValue(instance.LaunchConfigurationName)
 		if !strings.EqualFold(launchConfigName, instanceConfigName) {
+			r.Info("Instance is drifted, mismatch in launch configuration.",
+				"instanceID", instanceID, "instanceConfig", instanceConfigName,
+				"expectedConfig", launchConfigName)
 			return true
 		}
 	} else if scalingGroup.LaunchTemplate != nil {
+		r.Info("scalingGroup.LaunchTemplate != nil")
 		if instance.LaunchTemplate == nil {
 			r.Info("instance is drifted, instance launchtemplate is empty", "name", r.RollingUpgrade.NamespacedName())
 			return true
@@ -596,6 +613,7 @@ func (r *RollingUpgradeContext) IsInstanceDrifted(instance *autoscaling.Instance
 		}
 
 	} else if scalingGroup.MixedInstancesPolicy != nil {
+		// MixedInstancesPolicy == specifying multiple instance types, rather than sticking to a single instance type in the group and or/ use spot & on-demand instances together
 		if instance.LaunchTemplate == nil {
 			r.Info("instance is drifted, instance launchtemplate is empty", "name", r.RollingUpgrade.NamespacedName())
 			return true
@@ -634,6 +652,9 @@ func (r *RollingUpgradeContext) IsScalingGroupDrifted() bool {
 	r.Info("checking if rolling upgrade is completed", "name", r.RollingUpgrade.NamespacedName())
 
 	for _, instance := range scalingGroup.Instances {
+		// 25 instances in ASG, is this checking the nodes in clsuter that belong to that IG? or nodes in ASG in aws == IG?
+		// so it's saying all 27 have drift with ASG launch template, aren't the 2 new nodes with correct config?? why do they have drift?
+		// shouldn't drift count be 25?
 		if r.IsInstanceDrifted(instance) {
 			driftCount++
 		}
@@ -656,6 +677,7 @@ func (r *RollingUpgradeContext) DesiredNodesReady() bool {
 	)
 
 	// wait for desired instances
+	// checks EC2 instances exist and are Inservice (ready to serve traffic) in ASG
 	inServiceInstanceIDs := awsprovider.GetInServiceInstanceIDs(scalingGroup.Instances)
 	if len(inServiceInstanceIDs) != int(desiredInstances) {
 		r.Info("desired number of instances are not InService", "desired", int(desiredInstances), "inServiceCount", len(inServiceInstanceIDs), "name", r.RollingUpgrade.NamespacedName())
@@ -663,11 +685,25 @@ func (r *RollingUpgradeContext) DesiredNodesReady() bool {
 	}
 
 	// wait for desired nodes
+	// check that nodes are actually ready by checking:
+	// registered as nodes in the Kubernetes cluster
+	// are ready from a Kubernetes perspective (IsNodeReady), and
+	// have passed all readiness gates you've specified (IsNodePassesReadinessGates)
 	if r.Cloud.ClusterNodes != nil && !reflect.DeepEqual(r.Cloud.ClusterNodes, &corev1.NodeList{}) {
 		for _, node := range r.Cloud.ClusterNodes {
 			instanceID := kubeprovider.GetNodeInstanceID(node)
-			if common.ContainsEqualFold(inServiceInstanceIDs, instanceID) && kubeprovider.IsNodeReady(node) && kubeprovider.IsNodePassesReadinessGates(node, r.RollingUpgrade.Spec.ReadinessGates) {
-				readyNodes++
+			if common.ContainsEqualFold(inServiceInstanceIDs, instanceID) {
+				if kubeprovider.IsNodeReady(node) {
+					if kubeprovider.IsNodePassesReadinessGates(node, r.RollingUpgrade.Spec.ReadinessGates) {
+						readyNodes++
+					} else {
+						r.Info("Node did not pass readiness gates", "instanceID", instanceID)
+					}
+				} else {
+					r.Info("Node is not ready", "instanceID", instanceID)
+				}
+			} else {
+				r.Info("Node not registered", "nodeName", node.Name, "instanceID", instanceID)
 			}
 		}
 	}
@@ -714,6 +750,7 @@ func (r *RollingUpgradeContext) SetProgress(nodesProcessed int, totalNodes int) 
 
 		// expose total nodes and nodes processed to prometheus
 		common.SetTotalNodesMetric(r.RollingUpgrade.ScalingGroupName(), totalNodes)
+		// why is nodesProcessed empty k get rollingupgrade
 		common.SetNodesProcessedMetric(r.RollingUpgrade.ScalingGroupName(), nodesProcessed)
 	}
 
