@@ -458,7 +458,7 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 		r.Info("ignoring failed drain instances", "instances", excludedInstances, "name", r.RollingUpgrade.NamespacedName())
 	}
 	for _, instance := range r.Cloud.InProgressInstances {
-		r.Info("checking in progress instance", instance)
+		r.Info("checking in progress instance", "instance", instance)
 		if selectedInstance := awsprovider.SelectScalingGroupInstance(instance, scalingGroup); !reflect.DeepEqual(selectedInstance, &autoscaling.Instance{}) {
 			//In-progress instances shouldn't be considered if they are in terminating state.
 			if !common.ContainsEqualFold(awsprovider.TerminatingInstanceStates, aws.StringValue(selectedInstance.LifecycleState)) {
@@ -466,7 +466,7 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 			}
 		}
 	}
-	r.Info("len of unrpocessedTargets", len(unrpocessedTargets))
+	r.Info("len of unrpocessedTargets", "length", int(len(unrpocessedTargets)))
 
 	if len(inprogressTargets) > 0 {
 		r.Info("found in-progress instances 1", "instances", awsprovider.GetInstanceIDs(inprogressTargets), "name", r.RollingUpgrade.NamespacedName())
@@ -480,7 +480,7 @@ func (r *RollingUpgradeContext) SelectTargets(scalingGroup *autoscaling.Group, e
 	}
 
 	if len(instances) > 0 {
-		r.Info("found instances not in-progress", "instances", instances)
+		r.Info("found instances not in-progress", "instances", awsprovider.GetInstanceIDs(inprogressTargets))
 	}
 
 	// goes through instances not marked "in progress"
